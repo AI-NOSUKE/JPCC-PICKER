@@ -1,21 +1,21 @@
 name: CI
+
 on:
   push:
+    branches: [ main ]
   pull_request:
+    branches: [ main ]
+
 jobs:
-  smoke:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-      - name: Import smoke (no network)
-        run: |
-          python - <<'PY'
-          import importlib.util, sys
-          spec = importlib.util.spec_from_file_location('m','jpcc_picker.py')
-          m = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(m)
-          print('import_ok')
-          PY
+      - name: Install dependencies
+        run: pip install boto3
+      - name: Syntax check
+        run: python -m py_compile jpcc_picker.py

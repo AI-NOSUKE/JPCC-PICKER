@@ -1,4 +1,11 @@
+# Python キャッシュ
 __pycache__/
 *.pyc
-.DS_Store
+*.pyo
+
+# 出力ファイル
 output.csv
+
+# 環境
+.env
+.venv/
