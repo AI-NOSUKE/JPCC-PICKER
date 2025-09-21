@@ -9,3 +9,5 @@ output.csv
 # 環境
 .env
 .venv/
+
+**/desktop.ini
