@@ -10,18 +10,20 @@ ABEJA-CC-JA（Common Crawl 日本語版）の JSONL（`.jsonl` / `.jsonl.gz`）�
 
 ---
 
-## 要件
+## 📦 要件
 
 - Python 3.9+
 - 依存: `boto3`
 
 ```bash
+pip install -r requirements.txt
+# または
 pip install boto3
 ```
 
 ---
 
-## 使い方
+## 🚀 使い方
 
 1. `jpcc_picker.py` の先頭 **ユーザー設定** を必要に応じて変更
 2. 実行
@@ -42,7 +44,7 @@ python .\jpcc_picker.py
 
 ---
 
-## ユーザー設定
+## ⚙️ ユーザー設定
 
 ```python
 # ===== ユーザー設定 =====
@@ -69,7 +71,36 @@ MODE = "simple"                # "simple" / "random" / "all"
 
 ---
 
-## FAQ
+## 🎯 対象データ
+- S3 バケット: `s3://abeja-cc-ja/`
+- リージョン: `ap-northeast-1`
+- 認証: **不要（匿名アクセス可）**
+
+---
+
+## 📝 出力サンプル（先頭3行）
+
+```csv
+id,text,char_len,matched_keyword
+0,"…ももいろクローバーZ…",256,"ももいろクローバーZ"
+1,"…ももクロ…",142,"ももクロ"
+2,"…MOMOIRO CLOVER Z…",331,"MOMOIRO CLOVER Z"
+```
+
+---
+
+## 📊 進捗ログの例
+
+```
+[LIST] pages=...
+[PAGE] idx=1 objects=1000
+[STAT] lines=20000 hits=37
+[SAVE] output.csv rows=37
+```
+
+---
+
+## ❓ FAQ
 
 **Q. randomモードは時間がかかる？**  
 A. 公平性のため **全スキャン**します。進捗（lines）は最後に全行数まで伸びます。
@@ -82,3 +113,6 @@ A. boto3 のタイムアウト・リトライを有効化済み。改善しな�
 
 **Q. 進捗をもっと細かく見たい**  
 A. コードの `LOG_INTERVAL` を小さくしてください。
+
+**Q. 出力ファイルはどこにできる？**  
+A. 同じディレクトリに `output.csv` が生成されます。
