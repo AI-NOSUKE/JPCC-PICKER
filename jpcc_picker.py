@@ -12,12 +12,12 @@ from botocore import UNSIGNED
 from botocore.exceptions import ReadTimeoutError, EndpointConnectionError
 
 # ===== ユーザー設定 =====
-OUTFILE = "output.csv"         # 出力ファイル名
-KEYWORD = "ももクロ"           # 抽出したいキーワード（部分一致）
-MINL, MAXL = 100, 2000         # 最小・最大文字数
-LIMIT = 2000                   # 抽出件数（allモード時は無視）
-CHUNK_SIZE = 10 * 1024 * 1024  # 非gzの行復元用チャンク（10MB）
-MODE = "simple"                # "simple" / "random" / "all"
+OUTFILE = "output.csv"                     # 出力ファイル名
+KEYWORDS: list[str] = ["ももクロ","ももいろクローバーZ"]          # 抽出したいキーワード（複数可・部分一致＝本文のどこかにそのまま含まれていればヒット）
+MINL, MAXL = 100, 2000                     # 最小・最大文字数
+LIMIT = 1                               # 抽出件数（allモード時は無視）
+CHUNK_SIZE = 10 * 1024 * 1024              # 非gzの行復元用チャンク（10MB）
+MODE = "simple"                            # "simple" / "random" / "all"
 # ========================
 
 # 進捗の更新間隔（行数）
@@ -36,11 +36,37 @@ S3 = boto3.client(
 )
 BUCKET = "abeja-cc-ja"
 
+# 既存CSVの列構成に追従するためのフラグ（起動時に自動判定）
+APPEND_MATCHED_COL = False
+
 # ---------- ユーティリティ ----------
 def ensure_outfile(path: str):
-    if not os.path.exists(path):
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow(["id", "text", "char_len"])
+    """既存CSVがあれば先頭行の列数を見て追従。無ければ3列ヘッダを作成。"""
+    global APPEND_MATCHED_COL
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                header = f.readline().strip().split(",")
+            # 4列かつ末尾が matched_keyword なら4列運用に追従
+            if len(header) == 4 and header[-1].strip().lower() == "matched_keyword":
+                APPEND_MATCHED_COL = True
+            else:
+                APPEND_MATCHED_COL = False
+            return
+        except Exception:
+            pass
+    # 新規作成（3列）
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(["id", "text", "char_len"])
+    APPEND_MATCHED_COL = False
+
+def write_row(writer: csv.writer, row_id: str, txt: str):
+    """既存CSVの列構成に合わせて1行を書き出す（改行はスペース化）。"""
+    safe = txt.replace("\n", " ")
+    if APPEND_MATCHED_COL:
+        writer.writerow([row_id, safe, len(safe), ""])  # 旧4列ファイルに追従
+    else:
+        writer.writerow([row_id, safe, len(safe)])        # デフォは3列
 
 def obj_id_from_text(txt: str) -> str:
     return hashlib.md5(txt.encode("utf-8")).hexdigest()[:16]
@@ -55,7 +81,13 @@ def extract_text(o: dict) -> str | None:
 
 def match_text(txt: str) -> bool:
     n = len(txt)
-    return (MINL <= n <= MAXL) and (KEYWORD in txt)
+    if not (MINL <= n <= MAXL):
+        return False
+    # 複数キーワードの OR 判定（部分一致）
+    for kw in KEYWORDS:
+        if kw and kw in txt:
+            return True
+    return False
 
 # ---------- S3 列挙 & ストリーム ----------
 def list_jsonl_keys():
@@ -162,17 +194,17 @@ def run():
                     continue
 
                 t += 1
-                row = (obj_id_from_text(txt), txt.replace("\n", " "), len(txt))
+                row_id = obj_id_from_text(txt)
                 if len(reservoir) < LIMIT:
-                    reservoir.append(row)
+                    reservoir.append((row_id, txt))
                 else:
                     j = random.randint(1, t)
                     if j <= LIMIT:
-                        reservoir[j-1] = row
+                        reservoir[j-1] = (row_id, txt)
 
             # 書き出し（最後にまとめて）
-            for row in reservoir:
-                writer.writerow(row)
+            for row_id, txt in reservoir:
+                write_row(writer, row_id, txt)
                 hits += 1
 
         else:
@@ -186,7 +218,7 @@ def run():
                 if not txt or not match_text(txt):
                     continue
 
-                writer.writerow([obj_id_from_text(txt), txt.replace("\n", " "), len(txt)])
+                write_row(writer, obj_id_from_text(txt), txt)
                 hits += 1
 
                 if MODE == "simple" and hits >= LIMIT:
@@ -195,7 +227,7 @@ def run():
     # 最終行で改行してからサマリ
     print()
     print(f"STEP4: 完了  lines={lines:,}  hits={hits if MODE!='all' else str(hits)+'(all)'}")
-    print(f"✅ Done: {hits} rows -> {OUTFILE} (MODE={MODE}, KEYWORD={KEYWORD})")
+    print(f"✅ Done: {hits} rows -> {OUTFILE} (MODE={MODE}, KEYWORDS={KEYWORDS})")
 
 if __name__ == "__main__":
     run()

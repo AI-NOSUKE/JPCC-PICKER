@@ -1,15 +1,33 @@
-# Python キャッシュ
+# Byte-compiled / cache
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
+*.pyd
+*.pytest_cache/
 
-# 出力ファイル
+# Virtual envs
+.venv/
+venv/
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+
+# Editors / OS trash
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project outputs
 output.csv
 
-# 環境
-.env
-.venv/
+# Coverage / tools
+.coverage
+htmlcov/
+.mypy_cache/
 
-**/desktop.ini
-
-desktop.ini
+# Local Python version managers
+.python-version
