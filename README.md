@@ -75,7 +75,7 @@ boto3==1.34.*
 OUTFILE = "output.csv"
 KEYWORDS = ["ももクロ", "ももいろクローバーZ"]  # 複数指定で OR 検索
 MINL, MAXL = 100, 2000
-LIMIT = 5
+LIMIT = 2000
 MODE = "simple"  # "simple" / "all" / "random"
 ```
 
