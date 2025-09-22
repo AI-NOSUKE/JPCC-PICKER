@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -22,3 +22,8 @@ jobs:
 
       - name: Run picker (LIMIT=1)
         run: python jpcc_picker.py
+
+      - name: Check output
+        run: |
+          test -f output.csv
+          head -n 5 output.csv || true
