@@ -2,6 +2,7 @@
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![license](https://img.shields.io/badge/License-MIT-green)
 ![ci](https://github.com/AI-NOSUKE/JPCC-PICKER/actions/workflows/ci.yml/badge.svg)
+![release](https://img.shields.io/github/v/release/AI-NOSUKE/JPCC-PICKER?color=orange)
 
 
 
