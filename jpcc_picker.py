@@ -1,29 +1,34 @@
-# jpcc_picker.py
-# ABEJA-CC-JA から JSONL(.gz 含む) を匿名アクセスで読み、キーワードヒットを CSV 出力
-# - 決め打ちKey禁止（Paginatorで全件列挙）
-# - 匿名S3（UNSIGNED）+ タイムアウト/リトライ
-# - .gz/非gzどちらもストリーミング
-# - 進捗は1行上書き（lines / hits）
+# JPCC-PICKER（精密版＋UX改善・完全版）
+# - JSONを全行パースして本文を組み立て、正規化(NFKC)してから検索・長さ判定
+# - 正規表現でキーワード検索（ASCIIは擬似単語境界で誤ヒット抑制、日本語は部分一致）
+# - MODE: simple / random / all（randomはリザーバサンプリング）
+# - UX: STEPログ, [STAT], reached limit, done. は従来踏襲
+#   変更点:
+#     * STEP2: ファイル名を出さず「データにアクセス成功。」のみ
+#     * STEP3: 「キーワードピックアップ開始...」
+#     * CONFIG行を表示
+#     * simple到達時に改行を入れて 'reached limit=11' 合成バグを解消
 
-import os, sys, json, csv, gzip, random, hashlib
+import os, csv, gzip, time, json, re, random, hashlib, unicodedata
+from typing import Iterator, List, Dict, Any
+
 import boto3
 from botocore.client import Config
 from botocore import UNSIGNED
-from botocore.exceptions import ReadTimeoutError, EndpointConnectionError
+from botocore.exceptions import ReadTimeoutError, EndpointConnectionError, ClientError
 
 # ===== ユーザー設定 =====
 OUTFILE = "output.csv"                     # 出力ファイル名
 KEYWORDS: list[str] = ["ももクロ","ももいろクローバーZ"]          # 抽出したいキーワード（複数可・部分一致＝本文のどこかにそのまま含まれていればヒット）
-MINL, MAXL = 100, 2000                     # 最小・最大文字数
-LIMIT = 1                               # 抽出件数（allモード時は無視）
+MINL, MAXL = 100, 2000                     # 最小・最大文字数（短すぎる/長すぎるテキストを除外）
+LIMIT = 1                                  # 抽出件数（allモード時は無視）
 CHUNK_SIZE = 10 * 1024 * 1024              # 非gzの行復元用チャンク（10MB）
-MODE = "simple"                            # "simple" / "random" / "all"
+MODE = "simple"                            # simple=見つけ次第終了, random=ランダム抽出, all=全件抽出
 # ========================
 
-# 進捗の更新間隔（行数）
-LOG_INTERVAL = 10_000
+LOG_INTERVAL = 1_000  # [STAT] linesの表示間隔（必要なら 表示を増やす100_000 などへ）
 
-# S3 匿名クライアント（タイムアウト/リトライ強化）
+# 匿名S3クライアント
 S3 = boto3.client(
     "s3",
     region_name="ap-northeast-1",
@@ -36,198 +41,209 @@ S3 = boto3.client(
 )
 BUCKET = "abeja-cc-ja"
 
-# 既存CSVの列構成に追従するためのフラグ（起動時に自動判定）
+# 出力列互換（id,text,char_len[,matched_keyword]）
 APPEND_MATCHED_COL = False
-
-# ---------- ユーティリティ ----------
 def ensure_outfile(path: str):
-    """既存CSVがあれば先頭行の列数を見て追従。無ければ3列ヘッダを作成。"""
     global APPEND_MATCHED_COL
-    if os.path.exists(path):
+    if os.path.exists(path) and os.path.getsize(path) > 0:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 header = f.readline().strip().split(",")
-            # 4列かつ末尾が matched_keyword なら4列運用に追従
-            if len(header) == 4 and header[-1].strip().lower() == "matched_keyword":
-                APPEND_MATCHED_COL = True
-            else:
-                APPEND_MATCHED_COL = False
+            APPEND_MATCHED_COL = (len(header) == 4 and header[-1].strip().lower() == "matched_keyword")
             return
         except Exception:
             pass
-    # 新規作成（3列）
     with open(path, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(["id", "text", "char_len"])
     APPEND_MATCHED_COL = False
 
-def write_row(writer: csv.writer, row_id: str, txt: str):
-    """既存CSVの列構成に合わせて1行を書き出す（改行はスペース化）。"""
-    safe = txt.replace("\n", " ")
+def write_row(writer: csv.writer, obj_id: str, text: str):
+    safe = text.replace("\n", " ")
+    row_id = obj_id if obj_id and obj_id != "?" else hashlib.md5(safe.encode("utf-8")).hexdigest()[:16]
     if APPEND_MATCHED_COL:
-        writer.writerow([row_id, safe, len(safe), ""])  # 旧4列ファイルに追従
+        writer.writerow([row_id, safe, len(safe), ""])
     else:
-        writer.writerow([row_id, safe, len(safe)])        # デフォは3列
+        writer.writerow([row_id, safe, len(safe)])
 
-def obj_id_from_text(txt: str) -> str:
-    return hashlib.md5(txt.encode("utf-8")).hexdigest()[:16]
-
-def extract_text(o: dict) -> str | None:
-    # 既存仕様：代表的キーを優先
-    for k in ("content", "text", "body", "message", "doc", "article", "raw_text", "desc", "description", "title"):
-        v = o.get(k)
+# 本文抽出：代表キーを結合→NFKC正規化
+TEXT_KEYS = ("content","text","body","article","title","raw_text","message","desc","description")
+def normalize_text_fields(obj: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    for k in TEXT_KEYS:
+        v = obj.get(k)
         if isinstance(v, str) and v.strip():
-            return v
-    return None
+            parts.append(v.strip())
+    s = "\n".join(parts).strip()
+    return unicodedata.normalize("NFKC", s)
 
-def match_text(txt: str) -> bool:
-    n = len(txt)
-    if not (MINL <= n <= MAXL):
-        return False
-    # 複数キーワードの OR 判定（部分一致）
-    for kw in KEYWORDS:
-        if kw and kw in txt:
-            return True
-    return False
+# キーワード正規表現（ASCIIは境界、日本語は部分一致）
+def build_pat(keywords: List[str]) -> re.Pattern:
+    parts: List[str] = []
+    for kw in keywords:
+        if not kw:
+            continue
+        if kw.isascii():
+            parts.append(r"(?<![A-Za-z0-9_])" + re.escape(kw) + r"(?![A-Za-z0-9_])")
+        else:
+            parts.append(re.escape(kw))
+    return re.compile("|".join(parts)) if parts else re.compile(r"(?!a)a")
 
-# ---------- S3 列挙 & ストリーム ----------
-def list_jsonl_keys():
-    """バケット内の .jsonl / .jsonl.gz を全件ページング列挙"""
+PAT = build_pat(KEYWORDS)
+
+# CHUNK安全クランプ（非gz）
+_CH_MIN, _CH_MAX = 1*1024*1024, 16*1024*1024
+CHUNK = max(_CH_MIN, min(CHUNK_SIZE, _CH_MAX))
+
+def iter_lines_from_s3(key: str) -> Iterator[str]:
+    obj = S3.get_object(Bucket=BUCKET, Key=key)
+    body = obj["Body"]
+    if key.endswith(".gz"):
+        fh = gzip.GzipFile(fileobj=body)
+        for raw in fh:
+            if raw:
+                yield raw.decode("utf-8", errors="ignore").rstrip("\n")
+    else:
+        buf = ""
+        for chunk in body.iter_chunks(chunk_size=CHUNK):
+            if not chunk:
+                continue
+            buf += chunk.decode("utf-8", errors="ignore")
+            while True:
+                pos = buf.find("\n")
+                if pos == -1:
+                    break
+                yield buf[:pos]
+                buf = buf[pos+1:]
+        if buf:
+            yield buf
+
+def list_jsonl_keys(limit: int = 20) -> List[str]:
+    keys: List[str] = []
     paginator = S3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=BUCKET):
         for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if key.endswith(".jsonl") or key.endswith(".jsonl.gz"):
-                yield key
+            k = obj["Key"]
+            if k.endswith(".jsonl") or k.endswith(".jsonl.gz"):
+                keys.append(k)
+                if len(keys) >= limit:
+                    return keys
+    return keys
 
-def iter_lines_plain(stream_body) -> str:
-    """非gzの JSONL をチャンク読みして行復元（UTF-8）"""
-    buf = b""
-    for chunk in stream_body.iter_chunks(chunk_size=CHUNK_SIZE):
-        if not chunk:
-            continue
-        buf += chunk
-        while True:
-            pos = buf.find(b"\n")
-            if pos == -1:
-                break
-            line = buf[:pos]
-            buf = buf[pos+1:]
-            yield line.decode("utf-8", errors="ignore")
-    if buf:
-        yield buf.decode("utf-8", errors="ignore")
-
-def iter_records():
-    """S3 上の全 JSONL(.gz含む) を1行ずつ JSON にして流す（匿名・堅牢）"""
-    for key in list_jsonl_keys():
-        try:
-            obj = S3.get_object(Bucket=BUCKET, Key=key)
-            body = obj["Body"]
-            if key.endswith(".gz"):
-                fh = gzip.GzipFile(fileobj=body)
-                for raw in fh:
-                    if not raw:
-                        continue
-                    try:
-                        yield json.loads(raw.decode("utf-8", errors="ignore"))
-                    except Exception:
-                        continue
-            else:
-                for line in iter_lines_plain(body):
-                    if not line:
-                        continue
-                    try:
-                        yield json.loads(line)
-                    except Exception:
-                        continue
-        except (ReadTimeoutError, EndpointConnectionError) as e:
-            print(f"\n[WARN] ネットワークで一時エラー: {key} をスキップ ({e})")
-            continue
-        except Exception as e:
-            print(f"\n[WARN] 取得失敗: {key} をスキップ ({e})")
-            continue
-
-# ---------- メイン ----------
 def run():
+    mode = (MODE or "simple").lower()
+    if mode not in ("simple","random","all"):
+        print(f"[WARN] MODE={MODE} は不正のため simple にフォールバックします。")
+        mode = "simple"
+
     print("STEP1: 出力ファイル準備中...")
     ensure_outfile(OUTFILE)
 
     print("STEP2: データセット接続確認中...")
     try:
-        # まずは存在確認として1ページだけ列挙
-        first_keys = []
-        paginator = S3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=BUCKET, PaginationConfig={"MaxItems": 20}):
-            for obj in page.get("Contents", []):
-                k = obj["Key"]
-                if k.endswith(".jsonl") or k.endswith(".jsonl.gz"):
-                    first_keys.append(k)
-            break
+        first_keys = list_jsonl_keys(limit=20)
         if not first_keys:
-            print("STEP2: データセット接続OK（対象ファイルが見つかりません）")
-            print("中断します。対象の .jsonl / .jsonl.gz がバケットに存在するか確認してください。")
+            print("STEP2: データにアクセスできません（対象ファイルが見つからない）")
             return
-        print(f"STEP2: データセット接続確認OK（例: {first_keys[0]} 他 {len(first_keys)}件）")
-    except Exception as e:
+        # 素人向け：ファイル名は出さない
+        print("STEP2: データにアクセス成功。")
+    except ClientError as e:
         print(f"STEP2: データセット接続失敗: {e}")
         return
+    except Exception as e:
+        print(f"STEP2: 想定外の失敗: {e}")
+        return
 
-    print("STEP3: データ読み込み開始...")
-    print(f"[STAT] lines=0 hits=0/{LIMIT if MODE!='all' else '-'}", end="\r", flush=True)
+    print("STEP3: キーワードピックアップ開始...")
+    # 実行設定のエコー
+    print(f"[INFO] CONFIG KEYWORDS={KEYWORDS}, MODE={mode}, MINL={MINL}, MAXL={MAXL}, "
+          f"LIMIT={'ALL' if mode=='all' else LIMIT}")
 
+    print(f"[STAT] lines=0 hits=0/{LIMIT if mode!='all' else '-'}", end="\r", flush=True)
+
+    start = time.time()
     lines = 0
     hits = 0
-    reservoir = []  # random時のみ使用
+    seen_hits = 0
+    rnd = random.Random(42)
+    reservoir = []
 
-    with open(OUTFILE, "a", newline="", encoding="utf-8") as f:
+    with open(OUTFILE, "a", newline="", encoding="utf-8", buffering=1_048_576) as f:
         writer = csv.writer(f)
+        try:
+            paginator = S3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=BUCKET):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    if not (key.endswith(".jsonl") or key.endswith(".jsonl.gz")):
+                        continue
+                    try:
+                        for line in iter_lines_from_s3(key):
+                            lines += 1
+                            if lines == 1 or (lines % LOG_INTERVAL) == 0:
+                                print(f"[STAT] lines={lines:,} hits="
+                                      f"{(hits if mode!='random' else seen_hits)}/"
+                                      f"{(LIMIT if mode!='all' else '-')}",
+                                      end="\r", flush=True)
 
-        if MODE == "random":
-            # リザーバサンプリング（ヒットのみを対象）
-            t = 0  # ヒット総数
-            for rec in iter_records():
-                lines += 1
-                if lines == 1 or (lines % LOG_INTERVAL == 0):
-                    print(f"[STAT] lines={lines:,} hits={t}/{LIMIT}", end="\r", flush=True)
+                            try:
+                                data = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
 
-                txt = extract_text(rec)
-                if not txt or not match_text(txt):
-                    continue
+                            text = normalize_text_fields(data)
+                            if not text:
+                                continue
+                            if not PAT.search(text):
+                                continue
+                            n = len(text)
+                            if n < MINL or n > MAXL:
+                                continue
 
-                t += 1
-                row_id = obj_id_from_text(txt)
-                if len(reservoir) < LIMIT:
-                    reservoir.append((row_id, txt))
-                else:
-                    j = random.randint(1, t)
-                    if j <= LIMIT:
-                        reservoir[j-1] = (row_id, txt)
+                            obj_id = data.get("id", "?")
 
-            # 書き出し（最後にまとめて）
-            for row_id, txt in reservoir:
-                write_row(writer, row_id, txt)
-                hits += 1
+                            if mode == "all":
+                                write_row(writer, obj_id, text)
+                                hits += 1
+                            elif mode == "simple":
+                                write_row(writer, obj_id, text)
+                                hits += 1
+                                if LIMIT and hits >= LIMIT:
+                                    # 直前の [STAT]（end="\r"）を確定させないと "11" に見えるため改行
+                                    print()
+                                    print(f"[INFO] reached limit={LIMIT}")
+                                    raise StopIteration
+                            else:  # random
+                                seen_hits += 1
+                                if LIMIT and LIMIT > 0:
+                                    if len(reservoir) < LIMIT:
+                                        reservoir.append((obj_id, text))
+                                    else:
+                                        j = rnd.randrange(seen_hits)
+                                        if j < LIMIT:
+                                            reservoir[j] = (obj_id, text)
+                                else:
+                                    write_row(writer, obj_id, text)
+                                    hits += 1
 
-        else:
-            # simple / all：ヒットした順に逐次書き出し
-            for rec in iter_records():
-                lines += 1
-                if lines == 1 or (lines % LOG_INTERVAL == 0):
-                    print(f"[STAT] lines={lines:,} hits={hits}/{LIMIT if MODE!='all' else '-'}", end="\r", flush=True)
+                    except (ReadTimeoutError, EndpointConnectionError):
+                        continue
+        except StopIteration:
+            pass
 
-                txt = extract_text(rec)
-                if not txt or not match_text(txt):
-                    continue
+        if mode == "random" and LIMIT and LIMIT > 0:
+            for obj_id, text in reservoir:
+                write_row(writer, obj_id, text)
+            hits = min(LIMIT, seen_hits)
 
-                write_row(writer, obj_id_from_text(txt), txt)
-                hits += 1
-
-                if MODE == "simple" and hits >= LIMIT:
-                    break
-
-    # 最終行で改行してからサマリ
+    elapsed = time.time() - start
     print()
-    print(f"STEP4: 完了  lines={lines:,}  hits={hits if MODE!='all' else str(hits)+'(all)'}")
-    print(f"✅ Done: {hits} rows -> {OUTFILE} (MODE={MODE}, KEYWORDS={KEYWORDS})")
+    summary_hits = (
+        f"{hits if mode!='all' else str(hits)+'(all)'}"
+        if mode != "random" else f"{hits}/{seen_hits} (sample/seen)"
+    )
+    print(f"[INFO] done. lines={lines:,} hits={summary_hits} time={elapsed:.1f}s")
+    print(f"STEP4: 完了  lines={lines:,}  hits={summary_hits}  time={elapsed:.1f}s")
+    print(f"✅ Done: {hits} rows -> {OUTFILE} (MODE={mode}, KEYWORDS={KEYWORDS})")
 
 if __name__ == "__main__":
     run()
