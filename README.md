@@ -1,8 +1,5 @@
 # JPCC-PICKER
-![python](https://img.shields.io/badge/python-3.11%2B-blue)  
-![license](https://img.shields.io/badge/License-MIT-green)  
-![ci](https://github.com/AI-NOSUKE/JPCC-PICKER/actions/workflows/ci.yml/badge.svg)  
-![release](https://img.shields.io/github/v/release/AI-NOSUKE/JPCC-PICKER?color=orange)  
+![python](https://img.shields.io/badge/python-3.11%2B-blue)  ![license](https://img.shields.io/badge/License-MIT-green)  ![ci](https://github.com/AI-NOSUKE/JPCC-PICKER/actions/workflows/ci.yml/badge.svg)  ![release](https://img.shields.io/github/v/release/AI-NOSUKE/JPCC-PICKER?color=orange)  
 
 JPCC-PICKER は、公開されている Japanese Common Crawl (JPCC) データセットから、指定したキーワードを含む文章を簡単に抽出できるツールです。
 
