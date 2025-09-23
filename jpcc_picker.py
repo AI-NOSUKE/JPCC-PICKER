@@ -21,7 +21,7 @@ from botocore.exceptions import ReadTimeoutError, EndpointConnectionError, Clien
 OUTFILE = "output.csv"                     # 出力ファイル名
 KEYWORDS: list[str] = ["ももクロ","ももいろクローバーZ"]          # 抽出したいキーワード（複数可・部分一致＝本文のどこかにそのまま含まれていればヒット）
 MINL, MAXL = 100, 2000                     # 最小・最大文字数（短すぎる/長すぎるテキストを除外）
-LIMIT = 1                                  # 抽出件数（allモード時は無視）
+LIMIT = 2000                                  # 抽出件数（allモード時は無視）
 CHUNK_SIZE = 10 * 1024 * 1024              # 非gzの行復元用チャンク（10MB）
 MODE = "simple"                            # simple=見つけ次第終了, random=ランダム抽出, all=全件抽出
 # ========================
