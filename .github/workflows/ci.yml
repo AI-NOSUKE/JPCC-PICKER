@@ -21,7 +21,10 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run picker (LIMIT=1)
-        run: python jpcc_picker.py
+        run: |
+          # LIMIT を強制的に 1 に書き換えて実行
+          sed -i "s/^LIMIT\s*=.*/LIMIT = 1/" jpcc_picker.py
+          python jpcc_picker.py
 
       - name: Check output
         run: |
